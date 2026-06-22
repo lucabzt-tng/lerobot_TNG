@@ -1277,6 +1277,13 @@ class PI05Policy(PreTrainedPolicy):
         original_action_dim = self.config.output_features[ACTION].shape[0]
         losses = losses[:, :, :original_action_dim]
 
+        # Optionally mask to a subset of action dims (e.g. skip zero-variance dims)
+        if self.config.action_loss_indices is not None:
+            indices = torch.tensor(
+                self.config.action_loss_indices, dtype=torch.long, device=losses.device
+            )
+            losses = losses[:, :, indices]
+
         loss_dict = {
             "loss_per_dim": losses.mean(dim=[0, 1]).detach().cpu().numpy().tolist(),
         }

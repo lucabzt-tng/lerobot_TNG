@@ -76,6 +76,12 @@ class PI0Config(PreTrainedConfig):
         }
     )
 
+    # Optional mask: if set, only these action dimension indices contribute to the loss.
+    # Useful when some action dims have zero variance (always 0), which causes MEAN_STD
+    # normalization to divide by ~eps and explode gradients for those dims.
+    # Example: [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 12] to skip dead dims 7, 11, 13-21.
+    action_loss_indices: list[int] | None = None
+
     # Training settings
     gradient_checkpointing: bool = False  # Enable gradient checkpointing for memory optimization
     compile_model: bool = False  # Whether to use torch.compile for model optimization

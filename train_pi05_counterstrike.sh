@@ -1,0 +1,21 @@
+uv run --active lerobot-train \
+    --dataset.repo_id=v9_no_audio \
+    --dataset.root=/home/innovation-hacking/data/bozzetti/lerobot_data/counterstrike_benchmark_data/v9_no_audio \
+    --policy.type=pi05 \
+    --policy.pretrained_path=lerobot/pi05_base \
+    --policy.push_to_hub=false \
+    --policy.device=cuda \
+    --policy.dtype=bfloat16 \
+    --policy.gradient_checkpointing=true \
+    --policy.compile_model=true \
+    --policy.compile_mode='reduce-overhead' \
+    --wandb.enable=true \
+    --wandb.project='lerobot_pi05_counterstrike' \
+    --policy.freeze_vision_encoder=false \
+    --policy.train_expert_only=false \
+    --output_dir=/home/innovation-hacking/data/bozzetti/models/counterstrike/lerobot_pi05_test \
+    --job_name=pi05_gamepad \
+    --steps=50000 \
+    --save_freq=10000 \
+    --batch_size=32 \
+    "--policy.action_loss_indices=[0,1,2,3,4,5,6,8,9,10,12]"

@@ -1,0 +1,1 @@
+uv run python inference/counterstrike/async_inference.py       --model_path ~/bozzetti/models/counterstrike/lerobot_pi05_test/050000/pretrained_model       --server_address 127.0.0.1:8080

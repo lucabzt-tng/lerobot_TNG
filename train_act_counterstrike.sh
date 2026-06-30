@@ -1,0 +1,13 @@
+uv run --active lerobot-train \
+  --dataset.repo_id=v9_no_audio \
+  --dataset.root=/home/innovation-hacking/bozzetti/data/lerobot/v9_no_audio \
+  --policy.type=act \
+  --output_dir=/home/innovation-hacking/bozzetti/models/counterstrike/act_benchmark \
+  --job_name=act_benchmark \
+  --policy.device=cuda \
+  --wandb.enable=true \
+  --wandb.project='lerobot_act_counterstrike' \
+  --policy.push_to_hub=false \
+  --steps=50000 \
+  --save_freq=10000 \
+  --batch_size=32

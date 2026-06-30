@@ -280,7 +280,7 @@ FPS = 60
 
 FRAME_DURATION = 1 / FPS
 
-ACTION_HORIZON_USED = 8
+ACTION_HORIZON_USED = 16
 
 DIMS_VIDEO_RESIZED = {
     "height": 512,
@@ -634,34 +634,23 @@ def main(server_host: str, server_port: int):
         for _ in range(OBSERVATION_HORIZON_LEN):
             frame_memory.add(resized_frame, no_movement_axes, no_movement_buttons)
 
-    rtc_client = RTCInferenceClient(host=server_host, port=server_port)
+    client = RTCInferenceClient(host=server_host, port=server_port)
 
-    # --- initial observation ---
-    observation_dict = {
-        "state.axes": np.expand_dims(np.array(no_movement_axes), axis=0).astype(np.float32),
-        "state.buttons": np.expand_dims(np.array(no_movement_buttons), axis=0).astype(np.float32),
-        "video._view": np.expand_dims(resized_frame, axis=0).astype(np.uint8),
-        "annotation.human.task_description": [PROMPT]
-    }
-
-    if len(OBSERVATION_INDICES) > 1:
-        frames_array, observations_axes_array, observations_buttons_array = frame_memory.get_by_indices(
-            OBSERVATION_INDICES)
-        observation_dict = {
-            "state.axes": np.expand_dims(np.array(observations_axes_array), axis=0).astype(np.float32),
-            "state.buttons": np.expand_dims(np.array(observations_buttons_array), axis=0).astype(np.float32),
-            "video._view": np.expand_dims(frames_array, axis=0).astype(np.uint8),
-            "annotation.human.task_description": [PROMPT]
-        }
-
-    # RTC blending happens server-side: the server runs a background thread that
-    # continuously regenerates and blends chunks, and get_action() pops the next
-    # single, already-blended action per call. We query it once per frame.
-    print("Connected to RTC server; requesting one blended action per frame.")
+    # Synchronous open-loop chunking: fetch a full action chunk, execute its first
+    # ACTION_HORIZON_USED actions one per frame, hold the controller at neutral while
+    # the next chunk is queried, then repeat. No RTC blending happens here -- see
+    # rtc_inference.py for the RTC (one-blended-action-per-frame) path.
+    print(f"Connected to sync inference server; using {ACTION_HORIZON_USED} actions per chunk.")
 
     # Track the last executed action so it can be fed back as state on the next query.
     last_axes = no_movement_axes
     last_buttons = no_movement_buttons
+
+    # Current chunk and how many of its actions we've executed. chunk_axes=None forces
+    # a fetch on the first frame.
+    chunk_axes = None
+    chunk_buttons = None
+    chunk_idx = 0
 
     iter = 0
 
@@ -708,28 +697,40 @@ def main(server_host: str, server_port: int):
                     cv2.imwrite('test_image.png', resized_frame)
                     test_image_saved = True
 
-            # Query the server every frame. RTC blending is handled server-side;
-            # get_action returns a single, already-blended action.
-            observation_dict = {
-                "state.axes": np.expand_dims(np.array(last_axes), axis=0).astype(np.float32),
-                "state.buttons": np.expand_dims(np.array(last_buttons), axis=0).astype(np.float32),
-                "video._view": np.expand_dims(resized_frame, axis=0).astype(np.uint8),
-                "annotation.human.task_description": [PROMPT]
-            }
+            # Re-query only when the current chunk's first ACTION_HORIZON_USED actions
+            # are exhausted (or on the first frame). While the blocking chunk request is
+            # in flight, hold the controller at neutral so it does nothing meanwhile.
+            if chunk_axes is None or chunk_idx >= min(ACTION_HORIZON_USED, len(chunk_axes)):
+                execute_actions(gamepad, no_movement_axes, no_movement_buttons)
 
-            if len(OBSERVATION_INDICES) > 1:
-                frames_array, observations_axes_array, observations_buttons_array = frame_memory.get_by_indices(
-                    OBSERVATION_INDICES)
                 observation_dict = {
-                    "state.axes": np.expand_dims(np.array(observations_axes_array), axis=0).astype(np.float32),
-                    "state.buttons": np.expand_dims(np.array(observations_buttons_array), axis=0).astype(np.float32),
-                    "video._view": np.expand_dims(frames_array, axis=0).astype(np.uint8),
+                    "state.axes": np.expand_dims(np.array(last_axes), axis=0).astype(np.float32),
+                    "state.buttons": np.expand_dims(np.array(last_buttons), axis=0).astype(np.float32),
+                    "video._view": np.expand_dims(resized_frame, axis=0).astype(np.uint8),
                     "annotation.human.task_description": [PROMPT]
                 }
 
-            action = rtc_client.get_action(observation_dict)
-            current_axes = action["action.axes"]
-            current_buttons = action["action.buttons"]
+                if len(OBSERVATION_INDICES) > 1:
+                    frames_array, observations_axes_array, observations_buttons_array = frame_memory.get_by_indices(
+                        OBSERVATION_INDICES)
+                    observation_dict = {
+                        "state.axes": np.expand_dims(np.array(observations_axes_array), axis=0).astype(np.float32),
+                        "state.buttons": np.expand_dims(np.array(observations_buttons_array), axis=0).astype(np.float32),
+                        "video._view": np.expand_dims(frames_array, axis=0).astype(np.uint8),
+                        "annotation.human.task_description": [PROMPT]
+                    }
+
+                action_chunk = client.get_action_chunk(observation_dict)
+                chunk_axes = action_chunk["action.axes"]  # (chunk_size, 6)
+                chunk_buttons = action_chunk["action.buttons"]  # (chunk_size, num_buttons)
+                chunk_idx = 0
+                print(f"New action chunk obtained: {chunk_axes.shape[0]} actions "
+                      f"(using first {min(ACTION_HORIZON_USED, len(chunk_axes))}).")
+
+            # Execute the next action from the current chunk.
+            current_axes = chunk_axes[chunk_idx]
+            current_buttons = chunk_buttons[chunk_idx]
+            chunk_idx += 1
 
             execute_actions(gamepad, current_axes, current_buttons)
 
@@ -746,10 +747,11 @@ def main(server_host: str, server_port: int):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run RTC inference client against a GR00T server.")
+    parser = argparse.ArgumentParser(
+        description="Run synchronous (open-loop chunk) inference client against the inference server.")
     parser.add_argument("--host", type=str, default="127.0.0.1",
-                        help="GR00T server host (use 127.0.0.1 with SSH tunnel).")
-    parser.add_argument("--port", type=int, default=5555, help="GR00T server port.")
+                        help="Inference server host (use 127.0.0.1 with SSH tunnel).")
+    parser.add_argument("--port", type=int, default=5555, help="Inference server port.")
     args = parser.parse_args()
 
     main(server_host=args.host, server_port=args.port)

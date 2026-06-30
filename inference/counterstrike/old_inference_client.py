@@ -12,6 +12,7 @@
 ### bot_place
 
 import numpy as np
+from typing import Any, Dict, Tuple
 import cv2
 import argparse
 
@@ -20,7 +21,8 @@ import sys
 import Xlib
 import Xlib.display
 
-from inference_client import RTCInferenceClient
+import math
+from gr00t_client import Gr00tInferenceClient
 
 import time
 
@@ -31,8 +33,6 @@ from pynput import keyboard
 import pygame
 
 import subprocess
-
-from collections import deque
 
 import threading
 
@@ -272,10 +272,6 @@ STATES = [
     "Dpad Up"
 ]
 
-ARMS_RACE_PROMPT = "You are playing counterstrike. You are a counter-terrorist and playing Arms Race. Friends are marked with blue text above their heads. Search and shoot the enemies."
-DEATHMATCH_PROMPT = "You are playing counterstrike. You are a counter-terrorist and playing team deathmatch. Search and shoot the enemies."
-PROMPT = DEATHMATCH_PROMPT
-
 FPS = 60
 
 FRAME_DURATION = 1 / FPS
@@ -291,9 +287,9 @@ VIDEO_PATH = "cs_gr00t_test_vid.mp4"
 
 IMAGE_GRAB_DURATION = 6e-3
 
-# OBSERVATION_INDICES = [-20 , -10, 0]
+# OBSERVATION_INDICES = [-40,-20,-10,-5,0]
 
-OBSERVATION_INDICES = [0]
+OBSERVATION_INDICES = list(range(-240, 1, 15))
 
 SHIFTED_OBSERVATION_INDICES = [i - 1 for i in OBSERVATION_INDICES]
 
@@ -301,13 +297,7 @@ print("obs indices used: ", OBSERVATION_INDICES)
 
 print("shifted obs indices used: ", SHIFTED_OBSERVATION_INDICES)
 
-OBSERVATION_HORIZON_LEN = abs(max(SHIFTED_OBSERVATION_INDICES, key=abs))
-
-print("observation horizon len: ", OBSERVATION_HORIZON_LEN)
-
 OBSERVATION_INDICES = SHIFTED_OBSERVATION_INDICES
-
-DATA_CONFIG_FULL = True
 
 
 # cv_writer_global.write(cv2_frame)
@@ -366,12 +356,8 @@ def execute_actions(gamepad, axes: np.array, buttons: np.array):
         (clamp_value_between_m_1_and_1(axes[1])) * stick_scale * y_axis_inv_correction_factor))
     gamepad.right_joystick(x_value=int((clamp_value_between_m_1_and_1(axes[3])) * stick_scale), y_value=int(
         (clamp_value_between_m_1_and_1(axes[4])) * stick_scale * y_axis_inv_correction_factor))
-    # Triggers map model output [-1, 1] (-1 = released) to vgamepad's UNSIGNED byte
-    # [0, 255]. A negative value must clamp to 0 (released): passing it through would
-    # wrap modulo 256 into a positive byte and falsely pull the trigger (e.g. -0.85 *
-    # 255 = -216 -> 40 -> ~16% pull -> constant firing).
-    gamepad.left_trigger(value=max(0, int(clamp_value_between_m_1_and_1(axes[2]) * trigger_scale)))
-    gamepad.right_trigger(value=max(0, int(clamp_value_between_m_1_and_1(axes[5]) * trigger_scale)))
+    gamepad.left_trigger(value=int(clamp_value_between_m_1_and_1(axes[2]) * trigger_scale))
+    gamepad.right_trigger(value=int(clamp_value_between_m_1_and_1(axes[5]) * trigger_scale))
 
     if buttons[0] > 0.5:
         gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
@@ -503,49 +489,8 @@ def clamp_value_between_m_1_and_1(value):
     return max(-1, min(1, value))
 
 
-class FrameMemory:
-    def __init__(self, max_size=40):
-        self.max_size = max_size
-        self.memory = deque(maxlen=max_size)  # deque will automatically remove oldest when limit is exceeded
-
-    def add(self, frame, observation_axes, observation_buttons):
-        # Add new frame and observation at the most recent end
-        self.memory.append((frame, observation_axes, observation_buttons))
-
-    def get_all(self):
-        # Return all stored frames and observations
-        return list(self.memory)
-
-    def get_recent(self):
-        # Return the most recent frame and observation
-        return self.memory[-1] if self.memory else None
-
-    def get_oldest(self):
-        # Return the oldest frame and observation
-        return self.memory[0] if self.memory else None
-
-    def get_by_indices(self, indices):
-        # Extract frames and observations based on indices
-        selected_frames = []
-        selected_observations_axes = []
-        selected_observations_buttons = []
-
-        for i in indices:
-            frame, observation_axes, observation_buttons = self.memory[i]
-            selected_frames.append(frame)
-            selected_observations_axes.append(observation_axes)
-            selected_observations_buttons.append(observation_buttons)
-
-        # Convert to np.array: Assuming frames are NumPy arrays or similar structured data
-        frames_array = np.array(selected_frames)
-        observations_axes_array = np.array(selected_observations_axes)
-        observations_buttons_array = np.array(selected_observations_buttons)
-
-        return frames_array, observations_axes_array, observations_buttons_array
-
-
 def main(server_host: str, server_port: int):
-    print("Press x to let the policy play.")
+    print("Press x to let Gr00t play.")
 
     # Start listening to the keyboard
     with keyboard.Listener(on_press=on_press) as listener:
@@ -578,7 +523,7 @@ def main(server_host: str, server_port: int):
 
     gamepad = vg.VX360Gamepad()
 
-    time.sleep(3)  # TODO why sleep 3 seconds?
+    time.sleep(3)
 
     #### debug input to controller
 
@@ -603,17 +548,9 @@ def main(server_host: str, server_port: int):
 
     no_movement_axes = np.array([0, 0, 0, 0, 0, -1], dtype=np.float32)
 
-    small_movement_axes = np.array([0.1, 0, 0, 0.0, 0, 0], dtype=np.float32)
+    small_movement_axes = np.array([0, 0, 0, 0.065, 0, 0], dtype=np.float32)
 
-    team_select_axes = np.array([0, 0, 0, 0.07, 0, 0], dtype=np.float32)
-
-    if DATA_CONFIG_FULL == True:
-
-        no_movement_buttons = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-
-    else:
-
-        no_movement_buttons = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+    no_movement_buttons = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
 
     execute_actions(gamepad, no_movement_axes, no_movement_buttons)
 
@@ -628,40 +565,21 @@ def main(server_host: str, server_port: int):
     resized_frame = cv2.resize(img, (DIMS_VIDEO_RESIZED['width'], DIMS_VIDEO_RESIZED['height']),
                                interpolation=cv2.INTER_CUBIC)
 
-    if len(OBSERVATION_INDICES) > 1:
-        frame_memory = FrameMemory(max_size=OBSERVATION_HORIZON_LEN + 1)
+    gr00t_client = Gr00tInferenceClient(host=server_host, port=server_port)
 
-        for _ in range(OBSERVATION_HORIZON_LEN):
-            frame_memory.add(resized_frame, no_movement_axes, no_movement_buttons)
-
-    rtc_client = RTCInferenceClient(host=server_host, port=server_port)
-
-    # --- initial observation ---
+    # Send single raw frame + state to server (server manages frame memory)
     observation_dict = {
-        "state.axes": np.expand_dims(np.array(no_movement_axes), axis=0).astype(np.float32),
-        "state.buttons": np.expand_dims(np.array(no_movement_buttons), axis=0).astype(np.float32),
-        "video._view": np.expand_dims(resized_frame, axis=0).astype(np.uint8),
-        "annotation.human.task_description": [PROMPT]
+        "video._view": resized_frame.astype(np.uint8),
+        "state.axes": np.array(no_movement_axes).astype(np.float32),
+        "state.buttons": np.array(no_movement_buttons).astype(np.float32),
+        "observation_indices": OBSERVATION_INDICES,
+        "annotation.human.task_description": [
+            "You are playing counterstrike. You are a counter-terrorist and playing team deathmatch. Search and shoot the enemies."]
     }
 
-    if len(OBSERVATION_INDICES) > 1:
-        frames_array, observations_axes_array, observations_buttons_array = frame_memory.get_by_indices(
-            OBSERVATION_INDICES)
-        observation_dict = {
-            "state.axes": np.expand_dims(np.array(observations_axes_array), axis=0).astype(np.float32),
-            "state.buttons": np.expand_dims(np.array(observations_buttons_array), axis=0).astype(np.float32),
-            "video._view": np.expand_dims(frames_array, axis=0).astype(np.uint8),
-            "annotation.human.task_description": [PROMPT]
-        }
+    action_chunk = gr00t_client.get_action(observation_dict)
 
-    # RTC blending happens server-side: the server runs a background thread that
-    # continuously regenerates and blends chunks, and get_action() pops the next
-    # single, already-blended action per call. We query it once per frame.
-    print("Connected to RTC server; requesting one blended action per frame.")
-
-    # Track the last executed action so it can be fed back as state on the next query.
-    last_axes = no_movement_axes
-    last_buttons = no_movement_buttons
+    print("Single rtc action obtained from Gr00t client.: ", action_chunk)
 
     iter = 0
 
@@ -676,6 +594,8 @@ def main(server_host: str, server_port: int):
     listener_stop_resume = keyboard.Listener(on_press=on_press_to_stop_or_resume)
     listener_stop_resume.start()
 
+    iter = 0
+
     while running:
 
         if paused:
@@ -688,9 +608,7 @@ def main(server_host: str, server_port: int):
 
         if (elapsed_time >= FRAME_DURATION):
 
-            iter = iter + 1
-
-            frame, ts, seq = cap.grab_latest()
+            frame, ts, seq = cap.grab_next(last_seq=None, timeout=0.5)
 
             img = np.array(frame)
 
@@ -703,41 +621,38 @@ def main(server_host: str, server_port: int):
             resized_frame = cv2.resize(img, (DIMS_VIDEO_RESIZED['width'], DIMS_VIDEO_RESIZED['height']),
                                        interpolation=cv2.INTER_CUBIC)
 
-            if iter % 60 == 0:
-                if not test_image_saved:
-                    cv2.imwrite('test_image.png', resized_frame)
-                    test_image_saved = True
+            if not test_image_saved:
+                cv2.imwrite('test_image.png', resized_frame)
+                test_image_saved = True
 
-            # Query the server every frame. RTC blending is handled server-side;
-            # get_action returns a single, already-blended action.
-            observation_dict = {
-                "state.axes": np.expand_dims(np.array(last_axes), axis=0).astype(np.float32),
-                "state.buttons": np.expand_dims(np.array(last_buttons), axis=0).astype(np.float32),
-                "video._view": np.expand_dims(resized_frame, axis=0).astype(np.uint8),
-                "annotation.human.task_description": [PROMPT]
+            # Build single-frame observation for server
+            frame_obs = {
+                "video._view": resized_frame.astype(np.uint8),
+                "state.axes": np.array(
+                    action_chunk["action.axes"][min(iter, len(action_chunk["action.axes"]) - 1)]).astype(np.float32),
+                "state.buttons": np.array(
+                    action_chunk["action.buttons"][min(iter, len(action_chunk["action.buttons"]) - 1)]).astype(
+                    np.float32),
+                "observation_indices": OBSERVATION_INDICES,
             }
 
-            if len(OBSERVATION_INDICES) > 1:
-                frames_array, observations_axes_array, observations_buttons_array = frame_memory.get_by_indices(
-                    OBSERVATION_INDICES)
-                observation_dict = {
-                    "state.axes": np.expand_dims(np.array(observations_axes_array), axis=0).astype(np.float32),
-                    "state.buttons": np.expand_dims(np.array(observations_buttons_array), axis=0).astype(np.float32),
-                    "video._view": np.expand_dims(frames_array, axis=0).astype(np.uint8),
-                    "annotation.human.task_description": [PROMPT]
-                }
+            if iter == 16:
+                # Inference frame: store + get_action in one call
+                frame_obs["annotation.human.task_description"] = [
+                    "You are playing counterstrike. You are a counter-terrorist and playing team deathmatch. Search and shoot the enemies."]
+                execute_actions(gamepad, no_movement_axes, no_movement_buttons)
+                start_time = time.perf_counter()
+                action_chunk = gr00t_client.get_action(frame_obs)
+                end_time = time.perf_counter()
+                print("Time to get action: ", end_time - start_time)
+                iter = 0
+            else:
+                # Non-inference frame: just store in server memory
+                gr00t_client.store_frame(frame_obs)
 
-            action = rtc_client.get_action(observation_dict)
-            current_axes = action["action.axes"]
-            current_buttons = action["action.buttons"]
+            execute_actions(gamepad, action_chunk["action.axes"][iter], action_chunk["action.buttons"][iter])
 
-            execute_actions(gamepad, current_axes, current_buttons)
-
-            if len(OBSERVATION_INDICES) > 1:
-                frame_memory.add(resized_frame, current_axes, current_buttons)
-
-            last_axes = current_axes
-            last_buttons = current_buttons
+            iter = iter + 1
 
     else:
         listener_stop_resume.stop()
@@ -746,7 +661,7 @@ def main(server_host: str, server_port: int):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run RTC inference client against a GR00T server.")
+    parser = argparse.ArgumentParser(description="Run local game inference client against a GR00T server.")
     parser.add_argument("--host", type=str, default="127.0.0.1",
                         help="GR00T server host (use 127.0.0.1 with SSH tunnel).")
     parser.add_argument("--port", type=int, default=5555, help="GR00T server port.")
